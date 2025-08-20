@@ -1,29 +1,107 @@
-name: SPY Discord Alert
+name: SPY Discord Alert (Live 200DMAo ±3%)
 
 on:
   schedule:
-    - cron: '30 13 * * 1-5'  # Runs at 9:30 AM Toronto (EDT=UTC-4, adjust if DST changes)
-  workflow_dispatch:        # lets you run it manually from the Actions tab
+    # GitHub cron is UTC. 13:30 UTC = 9:30 AM Toronto during EDT.
+    # When Toronto is on EST, change to 14 30 (2:30 PM UTC).
+    - cron: '30 13 * * 1-5'
+  workflow_dispatch: {}   # allow manual runs from Actions tab
 
 jobs:
   send-alert:
     runs-on: ubuntu-latest
+    env:
+      DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
     steps:
-      - name: Send SPY Alert to Discord
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
         run: |
-          python3 - << 'EOF'
-          import requests, datetime
-          # --- Replace with your Discord webhook ---
-          WEBHOOK_URL = "https://discord.com/api/webhooks/1407815941152309469/2wAGJ42mkql-NeJYTWdywhslg1jjCA3KturWhIYqmBR4EaMU_cnh6RXZ0CRW1FwvD7ws"
-          
-          # dummy example values (later we can fetch live data)
-          open_price = 512.34
-          sma = 498.20
-          diff_pct = (open_price/sma - 1) * 100
-          state = "LONG"
-          action = "BUY"
-          today = datetime.date.today().isoformat()
+          python -m pip install --upgrade pip
+          pip install yfinance pandas numpy pytz
+      - name: Compute band + send to Discord
+        run: |
+          python - << 'PY'
+          import os, sys, datetime as dt
+          import numpy as np
+          import pandas as pd
+          import yfinance as yf
+          import requests
+          from pytz import timezone, UTC
 
-          message = f"SPY 09:30 Open ${open_price:.2f} | 200DMAo ${sma:.2f} | Δ {diff_pct:.2f}% | Band: {state} | {action} | {today}"
-          requests.post(WEBHOOK_URL, json={"content": message})
-          EOF
+          WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
+          if not WEBHOOK:
+            print("Missing DISCORD_WEBHOOK secret", file=sys.stderr); sys.exit(1)
+
+          # --- Time handling (Toronto) ---
+          tz = timezone("America/Toronto")
+          now_local = dt.datetime.now(tz)
+          today_str = now_local.date().isoformat()
+
+          # --- Download enough history to get a stable 200-DMA on OPENs ---
+          # We grab ~400 trading days to be safe.
+          df = yf.download("SPY", period="600d", interval="1d", auto_adjust=False, progress=False)
+          if df is None or df.empty or "Open" not in df.columns:
+            requests.post(WEBHOOK, json={"content": f"SPY band alert: data error | Date {today_str}"})
+            sys.exit(0)
+
+          # Ensure index is tz-aware UTC, then convert to Toronto calendar date
+          df.index = pd.to_datetime(df.index).tz_localize(UTC).tz_convert(tz)
+          df["date"] = df.index.date
+
+          # Rolling 200-SMA on OPEN prices (note: yfinance 'Open' is split-adjusted; dividends affect Adj Close only)
+          df["SMA200o"] = df["Open"].rolling(200).mean()
+
+          # Use the most recent row as "today". If 200-SMA not ready, fall back to last available where it exists.
+          valid = df.dropna(subset=["SMA200o"])
+          if valid.empty:
+            requests.post(WEBHOOK, json={"content": f"SPY band alert: not enough data for 200-DMA | Date {today_str}"})
+            sys.exit(0)
+
+          # Latest row (today or last trading day)
+          row_t = valid.iloc[-1]
+          # Yesterday (prior trading day with SMA available)
+          if len(valid) < 2:
+            requests.post(WEBHOOK, json={"content": f"SPY band alert: insufficient history | Date {today_str}"})
+            sys.exit(0)
+          row_y = valid.iloc[-2]
+
+          def state_from_band(open_px, sma):
+            if open_px > sma * 1.03: return "LONG"
+            if open_px < sma * 0.97: return "CASH"
+            return "NEUTRAL"
+
+          open_t = float(row_t["Open"])
+          sma_t  = float(row_t["SMA200o"])
+          open_y = float(row_y["Open"])
+          sma_y  = float(row_y["SMA200o"])
+
+          state_t = state_from_band(open_t, sma_t)
+          state_y = state_from_band(open_y, sma_y)
+
+          # Action per your rule set
+          if state_t == "LONG" and state_y in ("CASH","NEUTRAL"):
+            action = "BUY"
+          elif state_t == "CASH" and state_y in ("LONG","NEUTRAL"):
+            action = "SELL"
+          else:
+            action = "HOLD"
+
+          diff_pct = (open_t / sma_t - 1.0) * 100.0
+
+          # If today is not the same trading date as local date (e.g., running off-hours), mark prev day
+          suffix = ""
+          if row_t["date"] != now_local.date():
+            suffix = " (prev day)"
+
+          message = (
+            f"SPY 09:30 Open ${open_t:,.2f} | 200DMAo ${sma_t:,.2f} | Δ {diff_pct:+.2f}% | "
+            f"Band: {state_t} | {action} | {row_t['date']}{suffix}"
+          )
+
+          r = requests.post(WEBHOOK, json={"content": message}, timeout=20)
+          r.raise_for_status()
+          print("Sent:", message)
+          PY
