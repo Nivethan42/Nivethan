@@ -2,11 +2,11 @@ name: SPY Discord Alert (Live 200DMAo ±3%)
 
 on:
   schedule:
-    # GitHub cron uses UTC.
+    # GitHub cron runs in UTC.
     # 13:30 UTC = 09:30 America/Toronto during EDT (summer).
-    # Switch to '30 14 * * 1-5' when Toronto is on EST (winter).
+    # When Toronto switches to EST (winter), change to: '30 14 * * 1-5'
     - cron: '30 13 * * 1-5'
-  workflow_dispatch: {}   # allow manual runs from Actions tab
+  workflow_dispatch: {}   # allow manual runs from the Actions tab
 
 jobs:
   send-alert:
@@ -24,7 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install yfinance pandas numpy pytz requests
 
-      - name: Run SPY alert
+      - name: Compute 200DMA (OPEN) ±3% band and send to Discord
         run: |
           python - << 'PY'
           import os, sys, datetime as dt
@@ -41,33 +41,40 @@ jobs:
 
           WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
           if not WEBHOOK:
-              print("ERROR: Missing DISCORD_WEBHOOK env var", file=sys.stderr); sys.exit(1)
+              print("ERROR: Missing DISCORD_WEBHOOK secret", file=sys.stderr); sys.exit(1)
 
           tz = timezone("America/Toronto")
           now_local = dt.datetime.now(tz)
           today_str = now_local.date().isoformat()
 
-          try:
-              df = yf.download("SPY", period="600d", interval="1d",
-                               auto_adjust=False, progress=False)
-          except Exception as e:
-              post(WEBHOOK, f"SPY band alert: download error [{e}] | Date {today_str}")
-              sys.exit(0)
-
+          # --- Pull enough history for 200-DMA on OPENs ---
+          df = yf.download("SPY", period="600d", interval="1d", auto_adjust=False, progress=False)
           if df is None or df.empty:
               post(WEBHOOK, f"SPY band alert: data empty | Date {today_str}")
               sys.exit(0)
 
+          # If MultiIndex, flatten like "Open Spy"
           if isinstance(df.columns, pd.MultiIndex):
-              df.columns = [" ".join([c for c in tup if c]).strip()
-                            for tup in df.columns.to_flat_index()]
+              df.columns = [" ".join([c for c in tup if c]).strip() for tup in df.columns.to_flat_index()]
 
-          df.rename(columns={c: c.strip().title() for c in df.columns}, inplace=True)
+          # Normalize whitespace
+          df.columns = [str(c).strip() for c in df.columns]
 
-          if "Open" not in df.columns:
-              post(WEBHOOK, f"SPY band alert: 'Open' column missing. Got: {list(df.columns)}")
+          # ---- Find the Open column robustly (handles 'Open', 'Open Spy', etc.) ----
+          open_col = None
+          for c in df.columns:
+              if str(c).lower().startswith("open"):
+                  open_col = c
+                  break
+          if open_col is None:
+              post(WEBHOOK, f"SPY band alert: 'Open' column not found. Columns: {list(df.columns)}")
               sys.exit(0)
 
+          # Standardize to "Open" for downstream logic
+          if open_col != "Open":
+              df = df.rename(columns={open_col: "Open"})
+
+          # Index to UTC then convert to Toronto
           if df.index.tz is None:
               df.index = pd.to_datetime(df.index).tz_localize(UTC)
           else:
@@ -75,6 +82,7 @@ jobs:
           df = df.tz_convert(tz)
           df["date"] = df.index.date
 
+          # 200-day SMA on OPEN prices (split-adjusted; dividends do not affect Open)
           df["SMA200o"] = pd.Series(df["Open"]).rolling(200, min_periods=200).mean()
 
           valid = df.dropna(subset=["SMA200o"])
@@ -82,7 +90,9 @@ jobs:
               post(WEBHOOK, f"SPY band alert: not enough history for 200-DMA | Date {today_str}")
               sys.exit(0)
 
+          # Latest trading day with SMA ready
           row_t = valid.iloc[-1]
+          # Prior trading day (for yesterday's state)
           if len(valid) < 2:
               post(WEBHOOK, f"SPY band alert: insufficient history for prior state | Date {today_str}")
               sys.exit(0)
@@ -93,8 +103,8 @@ jobs:
               if open_px < sma * 0.97: return "CASH"
               return "NEUTRAL"
 
-          open_t = float(row_t["Open"]); sma_t = float(row_t["SMA200o"])
-          open_y = float(row_y["Open"]); sma_y = float(row_y["SMA200o"])
+          open_t = float(row_t["Open"]);  sma_t = float(row_t["SMA200o"])
+          open_y = float(row_y["Open"]);  sma_y = float(row_y["SMA200o"])
 
           state_t = band_state(open_t, sma_t)
           state_y = band_state(open_y, sma_y)
@@ -114,9 +124,6 @@ jobs:
               f"Band: {state_t} | {action} | {row_t['date']}{suffix}"
           )
 
-          try:
-              post(WEBHOOK, message)
-              print("Sent:", message)
-          except Exception as e:
-              print("Post failed:", e, file=sys.stderr); sys.exit(1)
+          post(WEBHOOK, message)
+          print("Sent:", message)
           PY
