@@ -1,0 +1,29 @@
+name: SPY Discord Alert
+
+on:
+  schedule:
+    - cron: '30 13 * * 1-5'  # Runs at 9:30 AM Toronto (EDT=UTC-4, adjust if DST changes)
+  workflow_dispatch:        # lets you run it manually from the Actions tab
+
+jobs:
+  send-alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send SPY Alert to Discord
+        run: |
+          python3 - << 'EOF'
+          import requests, datetime
+          # --- Replace with your Discord webhook ---
+          WEBHOOK_URL = "https://discord.com/api/webhooks/1407815941152309469/2wAGJ42mkql-NeJYTWdywhslg1jjCA3KturWhIYqmBR4EaMU_cnh6RXZ0CRW1FwvD7ws"
+          
+          # dummy example values (later we can fetch live data)
+          open_price = 512.34
+          sma = 498.20
+          diff_pct = (open_price/sma - 1) * 100
+          state = "LONG"
+          action = "BUY"
+          today = datetime.date.today().isoformat()
+
+          message = f"SPY 09:30 Open ${open_price:.2f} | 200DMAo ${sma:.2f} | Δ {diff_pct:.2f}% | Band: {state} | {action} | {today}"
+          requests.post(WEBHOOK_URL, json={"content": message})
+          EOF
