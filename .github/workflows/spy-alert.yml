@@ -1,26 +1,3 @@
-name: SPY Discord Alert (Live 200DMAo ±3%)
-
-on:
-  schedule:
-    # GitHub cron is UTC. 13:30 UTC = 9:30 AM Toronto during EDT.
-    # When Toronto is on EST, change to 14 30 (2:30 PM UTC).
-    - cron: '30 13 * * 1-5'
-  workflow_dispatch: {}   # allow manual runs from Actions tab
-
-jobs:
-  send-alert:
-    runs-on: ubuntu-latest
-    env:
-      DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-    steps:
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install yfinance pandas numpy pytz
       - name: Compute band + send to Discord
         run: |
           python - << 'PY'
@@ -35,40 +12,58 @@ jobs:
           if not WEBHOOK:
             print("Missing DISCORD_WEBHOOK secret", file=sys.stderr); sys.exit(1)
 
-          # --- Time handling (Toronto) ---
           tz = timezone("America/Toronto")
           now_local = dt.datetime.now(tz)
           today_str = now_local.date().isoformat()
 
-          # --- Download enough history to get a stable 200-DMA on OPENs ---
-          # We grab ~400 trading days to be safe.
+          # --- Fetch daily data (enough for 200-day SMA) ---
           df = yf.download("SPY", period="600d", interval="1d", auto_adjust=False, progress=False)
-          if df is None or df.empty or "Open" not in df.columns:
-            requests.post(WEBHOOK, json={"content": f"SPY band alert: data error | Date {today_str}"})
+          if df is None or df.empty:
+            requests.post(WEBHOOK, json={"content": f"SPY band alert: data empty | Date {today_str}"})
             sys.exit(0)
 
-          # Ensure index is tz-aware UTC, then convert to Toronto calendar date
-          df.index = pd.to_datetime(df.index).tz_localize(UTC).tz_convert(tz)
+          # Some yfinance versions return a MultiIndex on columns; flatten it.
+          if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [" ".join([c for c in tup if c]).strip() for tup in df.columns.to_flat_index()]
+
+          # Normalize column casing just in case
+          colmap = {c: c.strip().title() for c in df.columns}
+          df.rename(columns=colmap, inplace=True)
+
+          if "Open" not in df.columns:
+            requests.post(WEBHOOK, json={"content": f"SPY band alert: 'Open' column missing. Got: {list(df.columns)}"})
+            sys.exit(0)
+
+          # Index tz handling
+          if df.index.tz is None:
+            df.index = pd.to_datetime(df.index).tz_localize(UTC)
+          else:
+            df.index = pd.to_datetime(df.index).tz_convert(UTC)
+          df = df.tz_convert(tz)
           df["date"] = df.index.date
 
-          # Rolling 200-SMA on OPEN prices (note: yfinance 'Open' is split-adjusted; dividends affect Adj Close only)
-          df["SMA200o"] = df["Open"].rolling(200).mean()
+          # --- 200-DMA on OPEN ---
+          df["SMA200o"] = pd.Series(df["Open"]).rolling(200, min_periods=200).mean()
 
-          # Use the most recent row as "today". If 200-SMA not ready, fall back to last available where it exists.
+          # We require rows where SMA is defined
+          if "SMA200o" not in df.columns:
+            requests.post(WEBHOOK, json={"content": f"SPY band alert: SMA column not created"})
+            sys.exit(0)
+
           valid = df.dropna(subset=["SMA200o"])
           if valid.empty:
-            requests.post(WEBHOOK, json={"content": f"SPY band alert: not enough data for 200-DMA | Date {today_str}"})
+            requests.post(WEBHOOK, json={"content": f"SPY band alert: not enough history for 200-DMA | Date {today_str}"})
             sys.exit(0)
 
           # Latest row (today or last trading day)
           row_t = valid.iloc[-1]
-          # Yesterday (prior trading day with SMA available)
+          # Prior trading day w/ SMA
           if len(valid) < 2:
-            requests.post(WEBHOOK, json={"content": f"SPY band alert: insufficient history | Date {today_str}"})
+            requests.post(WEBHOOK, json={"content": f"SPY band alert: insufficient history for prior state | Date {today_str}"})
             sys.exit(0)
           row_y = valid.iloc[-2]
 
-          def state_from_band(open_px, sma):
+          def band_state(open_px, sma):
             if open_px > sma * 1.03: return "LONG"
             if open_px < sma * 0.97: return "CASH"
             return "NEUTRAL"
@@ -78,10 +73,9 @@ jobs:
           open_y = float(row_y["Open"])
           sma_y  = float(row_y["SMA200o"])
 
-          state_t = state_from_band(open_t, sma_t)
-          state_y = state_from_band(open_y, sma_y)
+          state_t = band_state(open_t, sma_t)
+          state_y = band_state(open_y, sma_y)
 
-          # Action per your rule set
           if state_t == "LONG" and state_y in ("CASH","NEUTRAL"):
             action = "BUY"
           elif state_t == "CASH" and state_y in ("LONG","NEUTRAL"):
@@ -91,7 +85,6 @@ jobs:
 
           diff_pct = (open_t / sma_t - 1.0) * 100.0
 
-          # If today is not the same trading date as local date (e.g., running off-hours), mark prev day
           suffix = ""
           if row_t["date"] != now_local.date():
             suffix = " (prev day)"
