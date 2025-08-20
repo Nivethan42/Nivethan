@@ -34,14 +34,9 @@ jobs:
           import requests
           from pytz import timezone, UTC
 
-          def post(webhook: str, msg: str):
-              r = requests.post(webhook, json={"content": msg}, timeout=20)
-              r.raise_for_status()
-              return r
-
           WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
           if not WEBHOOK:
-              print("ERROR: Missing DISCORD_WEBHOOK env var", file=sys.stderr); sys.exit(1)
+            print("ERROR: Missing DISCORD_WEBHOOK secret", file=sys.stderr); sys.exit(1)
 
           tz = timezone("America/Toronto")
           now_local = dt.datetime.now(tz)
@@ -50,12 +45,13 @@ jobs:
           # --- Pull enough history for 200-DMA on OPENs ---
           df = yf.download("SPY", period="600d", interval="1d", auto_adjust=False, progress=False)
           if df is None or df.empty:
-              post(WEBHOOK, f"@everyone SPY band alert: data empty | Date {today_str}")
-              sys.exit(0)
+            requests.post(WEBHOOK, json={"content": f"@everyone SPY band alert: data empty | Date {today_str}",
+                                         "allowed_mentions": {"parse": ["everyone"]}}, timeout=20)
+            sys.exit(0)
 
           # If MultiIndex, flatten like "Open Spy"
           if isinstance(df.columns, pd.MultiIndex):
-              df.columns = [" ".join([c for c in tup if c]).strip() for tup in df.columns.to_flat_index()]
+            df.columns = [" ".join([c for c in tup if c]).strip() for tup in df.columns.to_flat_index()]
 
           # Normalize whitespace
           df.columns = [str(c).strip() for c in df.columns]
@@ -63,18 +59,19 @@ jobs:
           # ---- Find the Open column robustly (handles 'Open', 'Open Spy', etc.) ----
           open_col = next((c for c in df.columns if str(c).lower().startswith("open")), None)
           if open_col is None:
-              post(WEBHOOK, f"@everyone SPY band alert: 'Open' column not found. Columns: {list(df.columns)}")
-              sys.exit(0)
+            requests.post(WEBHOOK, json={"content": f"@everyone SPY band alert: 'Open' column not found. Columns: {list(df.columns)}",
+                                         "allowed_mentions": {"parse": ["everyone"]}}, timeout=20)
+            sys.exit(0)
 
           # Standardize to "Open" for downstream logic
           if open_col != "Open":
-              df = df.rename(columns={open_col: "Open"})
+            df = df.rename(columns={open_col: "Open"})
 
           # Index to UTC then convert to Toronto
           if df.index.tz is None:
-              df.index = pd.to_datetime(df.index).tz_localize(UTC)
+            df.index = pd.to_datetime(df.index).tz_localize(UTC)
           else:
-              df.index = pd.to_datetime(df.index).tz_convert(UTC)
+            df.index = pd.to_datetime(df.index).tz_convert(UTC)
           df = df.tz_convert(tz)
           df["date"] = df.index.date
 
@@ -83,21 +80,23 @@ jobs:
 
           valid = df.dropna(subset=["SMA200o"])
           if valid.empty:
-              post(WEBHOOK, f"@everyone SPY band alert: not enough history for 200-DMA | Date {today_str}")
-              sys.exit(0)
+            requests.post(WEBHOOK, json={"content": f"@everyone SPY band alert: not enough history for 200-DMA | Date {today_str}",
+                                         "allowed_mentions": {"parse": ["everyone"]}}, timeout=20)
+            sys.exit(0)
 
           # Latest trading day with SMA ready
           row_t = valid.iloc[-1]
           # Prior trading day (for yesterday's state)
           if len(valid) < 2:
-              post(WEBHOOK, f"@everyone SPY band alert: insufficient history for prior state | Date {today_str}")
-              sys.exit(0)
+            requests.post(WEBHOOK, json={"content": f"@everyone SPY band alert: insufficient history for prior state | Date {today_str}",
+                                         "allowed_mentions": {"parse": ["everyone"]}}, timeout=20)
+            sys.exit(0)
           row_y = valid.iloc[-2]
 
           def band_state(open_px, sma):
-              if open_px > sma * 1.03: return "LONG"
-              if open_px < sma * 0.97: return "CASH"
-              return "NEUTRAL"
+            if open_px > sma * 1.03: return "LONG"
+            if open_px < sma * 0.97: return "CASH"
+            return "NEUTRAL"
 
           open_t = float(row_t["Open"]);  sma_t = float(row_t["SMA200o"])
           open_y = float(row_y["Open"]);  sma_y = float(row_y["SMA200o"])
@@ -106,20 +105,25 @@ jobs:
           state_y = band_state(open_y, sma_y)
 
           if state_t == "LONG" and state_y in ("CASH","NEUTRAL"):
-              action = "BUY"
+            action = "BUY"
           elif state_t == "CASH" and state_y in ("LONG","NEUTRAL"):
-              action = "SELL"
+            action = "SELL"
           else:
-              action = "HOLD"
+            action = "HOLD"
 
           diff_pct = (open_t / sma_t - 1.0) * 100.0
           suffix = "" if row_t["date"] == now_local.date() else " (prev day)"
 
           message = (
-              f"SPY 09:30 Open ${open_t:,.2f} | 200DMAo ${sma_t:,.2f} | Δ {diff_pct:+.2f}% | "
-              f"Band: {state_t} | {action} | {row_t['date']}{suffix}"
+            f"SPY 09:30 Open ${open_t:,.2f} | 200DMAo ${sma_t:,.2f} | Δ {diff_pct:+.2f}% | "
+            f"Band: {state_t} | {action} | {row_t['date']}{suffix}"
           )
 
-          post(WEBHOOK, f"@everyone {message}")
-          print("Sent with @everyone:", message)
+          payload = {
+            "content": f"@everyone {message}",
+            "allowed_mentions": {"parse": ["everyone"]}
+          }
+          r = requests.post(WEBHOOK, json=payload, timeout=20)
+          r.raise_for_status()
+          print("Sent with @everyone + allowed_mentions:", message)
           PY
