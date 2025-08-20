@@ -2,9 +2,9 @@ name: SPY Discord Alert (Live 200DMAo ±3%)
 
 on:
   schedule:
-    # GitHub cron runs in UTC.
+    # GitHub cron is UTC.
     # 13:30 UTC = 09:30 America/Toronto during EDT (summer).
-    # When Toronto switches to EST (winter), change to: '30 14 * * 1-5'
+    # Switch to '30 14 * * 1-5' when Toronto is on EST (winter).
     - cron: '30 13 * * 1-5'
   workflow_dispatch: {}   # allow manual runs from the Actions tab
 
@@ -41,7 +41,7 @@ jobs:
 
           WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
           if not WEBHOOK:
-              print("ERROR: Missing DISCORD_WEBHOOK secret", file=sys.stderr); sys.exit(1)
+              print("ERROR: Missing DISCORD_WEBHOOK env var", file=sys.stderr); sys.exit(1)
 
           tz = timezone("America/Toronto")
           now_local = dt.datetime.now(tz)
@@ -50,7 +50,7 @@ jobs:
           # --- Pull enough history for 200-DMA on OPENs ---
           df = yf.download("SPY", period="600d", interval="1d", auto_adjust=False, progress=False)
           if df is None or df.empty:
-              post(WEBHOOK, f"SPY band alert: data empty | Date {today_str}")
+              post(WEBHOOK, f"@everyone SPY band alert: data empty | Date {today_str}")
               sys.exit(0)
 
           # If MultiIndex, flatten like "Open Spy"
@@ -61,13 +61,9 @@ jobs:
           df.columns = [str(c).strip() for c in df.columns]
 
           # ---- Find the Open column robustly (handles 'Open', 'Open Spy', etc.) ----
-          open_col = None
-          for c in df.columns:
-              if str(c).lower().startswith("open"):
-                  open_col = c
-                  break
+          open_col = next((c for c in df.columns if str(c).lower().startswith("open")), None)
           if open_col is None:
-              post(WEBHOOK, f"SPY band alert: 'Open' column not found. Columns: {list(df.columns)}")
+              post(WEBHOOK, f"@everyone SPY band alert: 'Open' column not found. Columns: {list(df.columns)}")
               sys.exit(0)
 
           # Standardize to "Open" for downstream logic
@@ -87,14 +83,14 @@ jobs:
 
           valid = df.dropna(subset=["SMA200o"])
           if valid.empty:
-              post(WEBHOOK, f"SPY band alert: not enough history for 200-DMA | Date {today_str}")
+              post(WEBHOOK, f"@everyone SPY band alert: not enough history for 200-DMA | Date {today_str}")
               sys.exit(0)
 
           # Latest trading day with SMA ready
           row_t = valid.iloc[-1]
           # Prior trading day (for yesterday's state)
           if len(valid) < 2:
-              post(WEBHOOK, f"SPY band alert: insufficient history for prior state | Date {today_str}")
+              post(WEBHOOK, f"@everyone SPY band alert: insufficient history for prior state | Date {today_str}")
               sys.exit(0)
           row_y = valid.iloc[-2]
 
@@ -124,6 +120,6 @@ jobs:
               f"Band: {state_t} | {action} | {row_t['date']}{suffix}"
           )
 
-          post(WEBHOOK, message)
-          print("Sent:", message)
+          post(WEBHOOK, f"@everyone {message}")
+          print("Sent with @everyone:", message)
           PY
