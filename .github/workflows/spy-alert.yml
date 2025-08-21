@@ -2,11 +2,9 @@ name: SPY Discord Alert (Live 200DMAo ±3%)
 
 on:
   schedule:
-    # GitHub cron is UTC.
-    # 13:30 UTC = 09:30 America/Toronto during EDT (summer).
-    # Switch to '30 14 * * 1-5' when Toronto is on EST (winter).
-    - cron: '30 13 * * 1-5'
-  workflow_dispatch: {}   # allow manual runs from the Actions tab
+    - cron: '30 9 * * 1-5'         # 9:30 AM local time
+      timezone: America/Toronto    # <-- Handles DST automatically
+  workflow_dispatch: {}             # allow manual runs
 
 jobs:
   send-alert:
@@ -36,7 +34,7 @@ jobs:
 
           WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
           if not WEBHOOK:
-            print("ERROR: Missing DISCORD_WEBHOOK secret", file=sys.stderr); sys.exit(1)
+            print("ERROR: Missing DISCORD_WEBHOOK env var", file=sys.stderr); sys.exit(1)
 
           tz = timezone("America/Toronto")
           now_local = dt.datetime.now(tz)
